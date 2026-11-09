@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>KURT-herinnering</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#eef2f7;--fg:#14213d;--mut:#5b6b85;--card:#fff;--acc:#1d6f98;--bd:#cfd8e6;--bad:#b3261e;--ok:#1b7a43}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1724;--fg:#e8eef8;--mut:#93a3bd;--card:#18233a;--acc:#4cb3e0;--bd:#2b3a58;--bad:#ff8a80;--ok:#6fd49a}}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:480px;padding:max(16px,env(safe-area-inset-top)) 16px 32px;background:var(--bg);color:var(--fg);font:17px/1.4 system-ui,-apple-system,sans-serif}
+h1{font-size:22px;margin:0 0 4px}
+p.s{margin:0 0 8px;color:var(--mut);font-size:14px}
+label{display:block;font-size:14px;color:var(--mut);margin:14px 0 4px}
+input,select,button{width:100%;font:inherit;padding:13px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg)}
+button.go{background:var(--acc);color:#fff;border:0;font-weight:700;margin-top:18px;padding:15px}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.chip{width:auto;flex:0 0 auto;padding:13px 16px}
+.hit{padding:11px 13px;border:1px solid var(--bd);border-radius:10px;margin-top:6px;background:var(--card)}
+.hit.sel{border:2px solid var(--acc)}
+#msg{margin-top:12px;font-weight:600;min-height:1.4em}
+details{margin-top:22px;border-top:1px solid var(--bd);padding-top:10px}
+summary{color:var(--mut);cursor:pointer}
+a{color:var(--acc)}
+h2{font-size:17px;margin:26px 0 4px}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>KURT-herinnering</h1>
+<p class="s">Kies je plek en starttijd. Je krijgt een melding 30 min ervoor, één op het startuur en een luide als je niet incheckt.</p>
+
+<label for="bib">Bibliotheek</label>
+<select id="bib"></select>
+
+<label for="plek">Plaatsnummer of naam</label>
+<input id="plek" type="text" inputmode="text" autocomplete="off" placeholder="bv. 12">
+<div id="hits"></div>
+
+<label for="datum">Datum</label>
+<div class="row">
+  <input id="datum" type="date">
+  <button class="chip" type="button" id="vandaag">Vandaag</button>
+  <button class="chip" type="button" id="morgen">Morgen</button>
+</div>
+
+<label for="uur">Startuur</label>
+<input id="uur" type="time" step="300">
+
+<button class="go" id="go" type="button">Herinneringen plannen</button>
+<div id="msg" role="status"></div>
+
+<h2>Gepland</h2>
+<div id="lijst"></div>
+
+<details id="inst">
+  <summary>Instellingen</summary>
+  <label for="topic">ntfy-topic (zelfde als in de ntfy-app)</label>
+  <input id="topic" type="text" autocomplete="off" placeholder="kurt-herinnering-x7k2q9mw41">
+  <label for="file">xlsx-bestanden importeren (één per bib)</label>
+  <input id="file" type="file" accept=".xlsx,.xls" multiple>
+  <p class="s">De bestandsnaam wordt de naam van de bib. Opnieuw importeren met dezelfde naam vervangt de oude lijst.</p>
+  <div id="bibl"></div>
+</details>
+
+<script>
+const $=s=>document.querySelector(s);
+const get=(k,d)=>{try{const v=JSON.parse(localStorage.getItem(k));return v==null?d:v}catch(e){return d}};
+const set=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let bibs=get('bibs',{}),res=get('res',[]),pick=null;
+
+function msg(t,ok){const m=$('#msg');m.textContent=t;m.style.color=ok?'var(--ok)':'var(--bad)'}
+const iso=n=>{const d=new Date(Date.now()+n*864e5);return new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,10)};
+
+function renderBibs(){
+  const k=Object.keys(bibs);
+  $('#bib').innerHTML=k.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('')||'<option value="">Importeer eerst je xlsx (Instellingen)</option>';
+  $('#bibl').innerHTML=k.map(b=>`<div>${esc(b)} <small>(${bibs[b].length} plekken)</small> <a href="#" data-b="${esc(b)}">verwijder</a></div>`).join('');
+  zoek();
+}
+
+function zoek(){
+  const q=$('#plek').value.trim().toLowerCase(),L=bibs[$('#bib').value]||[];
+  pick=null;
+  let m=q?L.filter(p=>p.naam.toLowerCase().includes(q)):[];
+  const ex=m.filter(p=>p.naam.toLowerCase().split(/\s+/).includes(q));
+  if(ex.length)m=ex;
+  m=m.slice(0,5);
+  const h=$('#hits');h.innerHTML='';
+  m.forEach(p=>{
+    const d=document.createElement('div');d.className='hit';d.textContent=p.naam;
+    d.onclick=()=>{pick=p;[...h.children].forEach(x=>x.classList.remove('sel'));d.classList.add('sel')};
+    h.append(d);
+  });
+  if(m.length===1)h.firstChild.click();
+  else if(q&&!m.length)h.innerHTML='<small>Geen plek gevonden.</small>';
+}
+
+async function pub(topic,seq,body,title,prio,at,extra){
+  const h=Object.assign({Title:title,Priority:String(prio)},extra||{});
+  if(at-Date.now()>15e3)h.At=String(Math.floor(at/1e3));
+  const r=await fetch(`https://ntfy.sh/${topic}/${seq}`,{method:'POST',body,headers:h});
+  if(!r.ok)throw new Error('ntfy antwoordde '+r.status);
+}
+
+async function plan(){
+  const topic=get('topic','');
+  if(!topic){$('#inst').open=true;return msg('Vul eerst je ntfy-topic in bij Instellingen.')}
+  if(!pick)return msg('Kies eerst een plek.');
+  const uur=$('#uur').value,start=new Date(`${$('#datum').value}T${uur}`).getTime();
+  if(isNaN(start))return msg('Vul datum en startuur in.');
+  if(start<Date.now())return msg('Dat tijdstip ligt in het verleden.');
+  if(start+9e5-Date.now()>3*864e5)return msg('Te ver vooruit: ntfy plant maximaal 3 dagen. Plan het later opnieuw.');
+  const id=Date.now().toString(36),naam=pick.naam,link=pick.link;
+  $('#go').disabled=true;
+  try{
+    await pub(topic,id+'-a',`${naam} om ${uur}`,'Reservatie over 30 min',3,start-18e5,{Click:link});
+    await pub(topic,id+'-b',`${naam}: nu inchecken!`,'Reservatie begint nu',4,start,
+      {Click:link,Actions:`view, Open link, ${link}; http, Ingecheckt, https://ntfy.sh/${topic}/${id}-c, method=DELETE, clear=true`});
+    await pub(topic,id+'-c',`${naam}: NIET ingecheckt! Check nu in of annuleer.`,'KURT: no-show gevaar',5,start+9e5,{Click:link});
+  }catch(e){$('#go').disabled=false;return msg('Mislukt: '+e.message)}
+  $('#go').disabled=false;
+  res.push({id,naam,bib:$('#bib').value,start});set('res',res);renderRes();
+  msg('Gepland. Tik op het startuur op "Ingecheckt" in de melding.',1);
+}
+
+function renderRes(){
+  res=res.filter(r=>r.start>Date.now()-36e5);set('res',res);
+  $('#lijst').innerHTML=res.length?res.map((r,i)=>`<div class="hit">${esc(r.naam)} <small>(${esc(r.bib)})</small><br><small>${new Date(r.start).toLocaleString('nl-BE',{dateStyle:'short',timeStyle:'short'})}</small> · <a href="#" data-i="${i}">annuleer</a></div>`).join(''):'<small>Nog niets gepland.</small>';
+}
+
+$('#lijst').onclick=async e=>{
+  const i=e.target.dataset.i;if(i==null)return;e.preventDefault();
+  const r=res[i],t=get('topic','');
+  await Promise.all(['a','b','c'].map(s=>fetch(`https://ntfy.sh/${t}/${r.id}-${s}`,{method:'DELETE'}).catch(()=>{})));
+  res.splice(i,1);set('res',res);renderRes();msg('Herinneringen geannuleerd.',1);
+};
+$('#bibl').onclick=e=>{
+  const b=e.target.dataset.b;if(!b)return;e.preventDefault();
+  delete bibs[b];set('bibs',bibs);renderBibs();
+};
+$('#file').onchange=async e=>{
+  for(const f of e.target.files){
+    const wb=XLSX.read(await f.arrayBuffer()),rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1});
+    bibs[f.name.replace(/\.xlsx?$/i,'')]=rows.map(r=>{
+      const c=r.filter(x=>x!=null&&x!=='').map(String),link=c.find(x=>/^https?:/i.test(x));
+      return link?{naam:c.filter(x=>x!==link).join(' '),link}:null;
+    }).filter(Boolean);
+  }
+  set('bibs',bibs);renderBibs();e.target.value='';
+};
+$('#topic').value=get('topic','');
+$('#topic').onchange=e=>set('topic',e.target.value.trim());
+$('#bib').onchange=zoek;$('#plek').oninput=zoek;
+$('#vandaag').onclick=()=>{$('#datum').value=iso(0)};
+$('#morgen').onclick=()=>{$('#datum').value=iso(1)};
+$('#go').onclick=plan;
+$('#datum').value=iso(0);
+renderBibs();renderRes();
+</script>
+</body>
+</html>
