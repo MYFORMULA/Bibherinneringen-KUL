@@ -105,6 +105,27 @@ async function pub(topic,seq,body,title,prio,at,extra){
   if(!r.ok)throw new Error('ntfy antwoordde '+r.status);
 }
 
+// ntfy plant max. 3 dagen vooruit. Verder weg: bewaren en een "activeer"-melding sturen.
+const LIM=2.9*864e5;
+async function zet(r){
+  const topic=get('topic','');
+  if(r.start+9e5-Date.now()>LIM){
+    const t0=r.start+9e5-LIM;
+    await pub(topic,r.id+'-n',`Tik hier om je herinneringen voor ${r.naam} (${r.uur}) te activeren.`,'KURT: herinneringen activeren',4,Math.min(t0+36e5,Date.now()+2.8*864e5),{Click:location.href.split('#')[0]});
+    r.gepland=false;return;
+  }
+  const acties=`view, Ingecheckt, ${location.href.split('#')[0]}#ingecheckt=${topic}:${r.id}`,{id,naam,link,uur,start}=r;
+  await pub(topic,id+'-a',`${naam} om ${uur}. Inchecken kan pas vanaf ${uur}.`,'Reservatie over 20 min',3,start-12e5,{Click:link});
+  await pub(topic,id+'-b',`${naam}: nu inchecken!`,'Reservatie begint nu',4,start,{Click:link,Actions:acties});
+  await pub(topic,id+'-c',`${naam}: nog niet ingecheckt!`,'Nog niet ingecheckt',4,start+6e5,{Click:link,Actions:acties});
+  await pub(topic,id+'-d',`${naam}: NIET ingecheckt! Check nu in of annuleer.`,'KURT: no-show gevaar',5,start+9e5,{Click:link,Actions:acties});
+  r.gepland=true;
+}
+async function activeer(){
+  for(const r of res)if(r.gepland===false&&r.start>Date.now()){try{await zet(r)}catch(e){}}
+  set('res',res);renderRes();
+}
+
 async function plan(){
   const topic=get('topic','');
   if(!topic){$('#inst').open=true;return msg('Vul eerst je ntfy-topic in bij Instellingen.')}
@@ -112,29 +133,25 @@ async function plan(){
   const uur=$('#uur').value,start=new Date(`${$('#datum').value}T${uur}`).getTime();
   if(isNaN(start))return msg('Vul datum en startuur in.');
   if(start<Date.now())return msg('Dat tijdstip ligt in het verleden.');
-  if(start+9e5-Date.now()>3*864e5)return msg('Te ver vooruit: ntfy plant maximaal 3 dagen. Plan het later opnieuw.');
-  const id=Date.now().toString(36),naam=pick.naam,link=pick.link;
+  const id=Date.now().toString(36),naam=pick.naam,link=pick.link,R={id,naam,link,uur,bib:$('#bib').value,start};
   $('#go').disabled=true;
   try{
-    await pub(topic,id+'-a',`${naam} om ${uur}`,'Reservatie over 30 min',3,start-18e5,{Click:link});
-    await pub(topic,id+'-b',`${naam}: nu inchecken!`,'Reservatie begint nu',4,start,
-      {Click:link,Actions:`view, Open link, ${link}; http, Ingecheckt, https://ntfy.sh/${topic}/${id}-c, method=DELETE, clear=true`});
-    await pub(topic,id+'-c',`${naam}: NIET ingecheckt! Check nu in of annuleer.`,'KURT: no-show gevaar',5,start+9e5,{Click:link});
+    await zet(R);
   }catch(e){$('#go').disabled=false;return msg('Mislukt: '+e.message)}
   $('#go').disabled=false;
-  res.push({id,naam,bib:$('#bib').value,start});set('res',res);renderRes();
-  msg('Gepland. Tik op het startuur op "Ingecheckt" in de melding.',1);
+  res.push(R);set('res',res);renderRes();
+  msg(R.gepland===false?'Opgeslagen. Je krijgt later een melding om de herinneringen te activeren: tik erop.':'Gepland. Tik op het startuur op "Ingecheckt" in de melding.',1);
 }
 
 function renderRes(){
   res=res.filter(r=>r.start>Date.now()-36e5);set('res',res);
-  $('#lijst').innerHTML=res.length?res.map((r,i)=>`<div class="hit">${esc(r.naam)} <small>(${esc(r.bib)})</small><br><small>${new Date(r.start).toLocaleString('nl-BE',{dateStyle:'short',timeStyle:'short'})}</small> · <a href="#" data-i="${i}">annuleer</a></div>`).join(''):'<small>Nog niets gepland.</small>';
+  $('#lijst').innerHTML=res.length?res.map((r,i)=>`<div class="hit">${esc(r.naam)} <small>(${esc(r.bib)})</small><br><small>${new Date(r.start).toLocaleString('nl-BE',{dateStyle:'short',timeStyle:'short'})}${r.gepland===false?' · wacht op activatie':''}</small> · <a href="#" data-i="${i}">annuleer</a></div>`).join(''):'<small>Nog niets gepland.</small>';
 }
 
 $('#lijst').onclick=async e=>{
   const i=e.target.dataset.i;if(i==null)return;e.preventDefault();
   const r=res[i],t=get('topic','');
-  await Promise.all(['a','b','c'].map(s=>fetch(`https://ntfy.sh/${t}/${r.id}-${s}`,{method:'DELETE'}).catch(()=>{})));
+  await Promise.all(['a','b','c','d','n'].map(s=>fetch(`https://ntfy.sh/${t}/${r.id}-${s}`,{method:'DELETE'}).catch(()=>{})));
   res.splice(i,1);set('res',res);renderRes();msg('Herinneringen geannuleerd.',1);
 };
 $('#bibl').onclick=e=>{
@@ -182,6 +199,17 @@ async function sync(){
   }catch(e){}
 }
 sync();
+activeer();
+
+// Wordt geopend via de knop "Ingecheckt" in de melding: stopt de resterende herinneringen
+(async function(){
+  const m=location.hash.match(/^#ingecheckt=([\w-]+):(\w+)$/);
+  if(!m)return;
+  history.replaceState(null,'',location.pathname);
+  await Promise.all(['c','d'].map(s=>fetch(`https://ntfy.sh/${m[1]}/${m[2]}-${s}`,{method:'DELETE'}).catch(()=>{})));
+  res=res.filter(r=>r.id!==m[2]);set('res',res);renderRes();
+  msg('Ingecheckt. De herinneringen zijn gestopt.',1);
+})();
 </script>
 </body>
 </html>
